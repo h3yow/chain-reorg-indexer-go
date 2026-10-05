@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
+	"net/http/httptest"
 	"time"
 
 	"github.com/h3yow/chain-reorg-indexer-go/internal/fakenode"
@@ -17,6 +19,8 @@ import (
 )
 
 func main() {
+	useHTTP := flag.Bool("http", false, "access the fake node over HTTP JSON-RPC instead of in-process calls")
+	flag.Parse()
 	ctx := context.Background()
 
 	// 1. Programmable fake node with an initial 10-block chain (tip 9).
@@ -24,7 +28,19 @@ func main() {
 	node.SetChain(fakenode.BuildLinear("A", 0, 10)...)
 	node.FailNext("blk", -1, rpc.ClassRateLimited, 2) // first 2 block calls are 429
 
-	client := rpc.NewRetryClient(node, rpc.RetryPolicy{
+	// 2. Access mode: in-process client, or the same node served over HTTP
+	// JSON-RPC and reached via rpc.JSONRPCClient. Indexer behavior is identical.
+	var base rpc.Client = node
+	if *useHTTP {
+		srv := httptest.NewServer(node.Handler())
+		defer srv.Close()
+		base = rpc.NewJSONRPCClient(srv.URL, 2*time.Second)
+		fmt.Printf("node access: HTTP JSON-RPC at %s\n", srv.URL)
+	} else {
+		fmt.Println("node access: in-process")
+	}
+
+	client := rpc.NewRetryClient(base, rpc.RetryPolicy{
 		MaxAttempts: 4,
 		BaseBackoff: 20 * time.Millisecond,
 		MaxBackoff:  200 * time.Millisecond,
