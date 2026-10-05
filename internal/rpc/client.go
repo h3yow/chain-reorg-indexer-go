@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/h3yow/chain-reorg-indexer-go/internal/types"
@@ -50,9 +51,11 @@ func (e *RetryExhausted) Unwrap() error { return e.Last }
 func (e *RetryExhausted) Is(target error) bool { return target == ErrRetryExhausted }
 
 // RetryClient wraps a Client and retries retryable errors per RetryPolicy.
+// It is safe for concurrent use (the indexer fetches blocks in parallel).
 type RetryClient struct {
 	inner  Client
 	policy RetryPolicy
+	mu     sync.Mutex // guards rng (rand.Rand is not goroutine-safe)
 	rng    *rand.Rand
 	sleep  func(ctx context.Context, d time.Duration) error
 }
@@ -101,7 +104,10 @@ func (c *RetryClient) call(ctx context.Context, what string, fn func() error) er
 			backoff = c.policy.MaxBackoff
 		}
 		// 25% full jitter to avoid thundering-herd retries.
-		wait := backoff - time.Duration(c.rng.Int63n(int64(backoff)/4+1))
+		c.mu.Lock()
+		jitter := c.rng.Int63n(int64(backoff)/4 + 1)
+		c.mu.Unlock()
+		wait := backoff - time.Duration(jitter)
 		if wait < 0 {
 			wait = backoff
 		}

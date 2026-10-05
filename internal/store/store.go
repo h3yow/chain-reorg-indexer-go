@@ -143,6 +143,18 @@ func (s *Store) FinalizedHead() (uint64, bool) {
 // RollbackTo removes every stored block with height > keepHeight, along with
 // that branch's events. Removing a finalized block fails explicitly.
 func (s *Store) RollbackTo(keepHeight uint64) (int, error) {
+	return s.rollbackTo(keepHeight, false)
+}
+
+// ForceRollbackTo is RollbackTo without the finalized-block guard. It exists
+// for configurations with zero required confirmations, where "finalized" is
+// only a presentation flag and the indexer is expected to follow the node's
+// current chain no matter what was previously presented.
+func (s *Store) ForceRollbackTo(keepHeight uint64) (int, error) {
+	return s.rollbackTo(keepHeight, true)
+}
+
+func (s *Store) rollbackTo(keepHeight uint64, allowFinalized bool) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -153,7 +165,7 @@ func (s *Store) RollbackTo(keepHeight uint64) (int, error) {
 			if !ok {
 				continue
 			}
-			if b.Finalized {
+			if b.Finalized && !allowFinalized {
 				return removed, fmt.Errorf("%w at height %d", ErrFinalizedRollback, h)
 			}
 			for _, ev := range b.Events {

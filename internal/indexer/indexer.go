@@ -312,12 +312,17 @@ func (ix *Indexer) resolveReorg(ctx context.Context, hint uint64) (uint64, int, 
 	ancestor, found := ix.findCommonAncestor(ctx, hint)
 
 	// Never silently revert finalized data: a reorg past the confirmation
-	// depth is an explicit, distinguishable failure.
-	if fh, ok := ix.cfg.Store.FinalizedHead(); ok && (!found || fh > ancestor) {
-		ix.log("reorg decision=reject reason=would-revert-finalized finalized-head=%d ancestor=%d",
-			fh, ancestor)
-		return 0, 0, fmt.Errorf("%w: finalized head %d, common ancestor %d",
-			ErrFinalityReorg, fh, ancestor)
+	// depth is an explicit, distinguishable failure. With zero required
+	// confirmations there is no finality promise to protect — blocks are
+	// presented immediately and must be corrected when the node swaps them.
+	protected := ix.cfg.Rule.Confirmations > 0
+	if protected {
+		if fh, ok := ix.cfg.Store.FinalizedHead(); ok && (!found || fh > ancestor) {
+			ix.log("reorg decision=reject reason=would-revert-finalized finalized-head=%d ancestor=%d",
+				fh, ancestor)
+			return 0, 0, fmt.Errorf("%w: finalized head %d, common ancestor %d",
+				ErrFinalityReorg, fh, ancestor)
+		}
 	}
 
 	var removed int
@@ -328,7 +333,11 @@ func (ix *Indexer) resolveReorg(ctx context.Context, hint uint64) (uint64, int, 
 	}
 
 	var err error
-	removed, err = ix.cfg.Store.RollbackTo(ancestor)
+	if protected {
+		removed, err = ix.cfg.Store.RollbackTo(ancestor)
+	} else {
+		removed, err = ix.cfg.Store.ForceRollbackTo(ancestor)
+	}
 	if err != nil {
 		return 0, removed, fmt.Errorf("indexer: rollback to %d: %w", ancestor, err)
 	}
@@ -381,12 +390,21 @@ func (ix *Indexer) findCommonAncestor(ctx context.Context, hint uint64) (uint64,
 	return 0, false
 }
 
-// verifyTail checks every stored unfinalized height up to tip against the
-// node. It returns the first height whose hash differs (a reorg at equal
-// height). Finalized heights are intentionally not re-verified: reverting them
-// is reported as ErrFinalityReorg via resolveReorg.
+// verifyTail checks stored heights up to tip against the node and returns the
+// first height whose hash differs (a reorg at equal height). With
+// confirmations > 0 only the unfinalized tail is re-verified: finalized
+// heights are protected and any divergence there is reported as
+// ErrFinalityReorg via resolveReorg. With zero confirmations every block is
+// immediately presentable, so every stored height must be re-verified — a
+// same-height hash swap must be corrected no matter what was presented before.
 func (ix *Indexer) verifyTail(ctx context.Context, tip uint64) (uint64, bool, error) {
-	for _, b := range ix.cfg.Store.UnfinalizedBlocks() {
+	var candidates []store.BlockRecord
+	if ix.cfg.Rule.Confirmations == 0 {
+		candidates = ix.cfg.Store.AllBlocks()
+	} else {
+		candidates = ix.cfg.Store.UnfinalizedBlocks()
+	}
+	for _, b := range candidates {
 		if b.Number > tip {
 			// A stored block above the node tip is handled by the tip-rollback
 			// branch in Run, not here.
